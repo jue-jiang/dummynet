@@ -56,6 +56,7 @@ static struct _s_x dummynet_params[] = {
 	{ "sched_mask",		TOK_SCHED_MASK },
 	{ "flow_mask",		TOK_FLOW_MASK },
 	{ "droptail",		TOK_DROPTAIL },
+	{ "ecn",		TOK_ECN},
 	{ "red",		TOK_RED },
 	{ "gred",		TOK_GRED },
 	{ "bw",			TOK_BW },
@@ -251,7 +252,7 @@ print_flowset_parms(struct dn_fs *fs, char *prefix)
 	else
 		plr[0] = '\0';
 
-	if (fs->flags & DN_IS_RED)	/* RED parameters */
+	if (fs->flags & DN_IS_RED){	/* RED parameters */
 		sprintf(red,
 		    "\n\t %cRED w_q %f min_th %d max_th %d max_p %f",
 		    (fs->flags & DN_IS_GENTLE_RED) ? 'G' : ' ',
@@ -259,7 +260,9 @@ print_flowset_parms(struct dn_fs *fs, char *prefix)
 		    fs->min_th,
 		    fs->max_th,
 		    1.0 * fs->max_p / (double)(1 << SCALE_RED));
-	else
+		if(fs->flags & DN_IS_ECN)
+			strncat(red, " (ecn)", 6);				
+	}else
 		sprintf(red, "droptail");
 
 	if (prefix[0]) {
@@ -1102,11 +1105,14 @@ end_mask:
 			}
 			if ((end = strsep(&av[0], "/"))) {
 			    double max_p = strtod(end, NULL);
-			    if (max_p > 1 || max_p <= 0)
-				errx(EX_DATAERR, "0 < max_p <= 1");
+			    if (max_p > 1 || max_p < 0)
+				errx(EX_DATAERR, "0 <= max_p <= 1");
 			    fs->max_p = (int)(max_p * (1 << SCALE_RED));
 			}
 			ac--; av++;
+			break;
+		case TOK_ECN:
+			fs->flags |=DN_IS_ECN;
 			break;
 
 		case TOK_DROPTAIL:
@@ -1225,9 +1231,9 @@ end_mask:
 		len = sizeof(limit);
 		if (sysctlbyname("net.inet.ip.dummynet.pipe_byte_limit",
 			&limit, &len, NULL, 0) == -1)
-			limit = 1024*1024;
+			limit=1024*1024;
 		if (fs->qsize > limit)
-			errx(EX_DATAERR, "queue size must be < %ldB", limit);
+			errx(EX_DATAERR, "modifed queue size must be < %ldB", limit);
 	    } else {
 		size_t len;
 		long limit;
@@ -1239,15 +1245,21 @@ end_mask:
 		if (fs->qsize > limit)
 			errx(EX_DATAERR, "2 <= queue size <= %ld", limit);
 	    }
+	    if ((fs->flags & DN_IS_ECN) && !(fs->flags & DN_IS_RED))
+		errx(EX_USAGE, "enable red/gred for ECN");
 
 	    if (fs->flags & DN_IS_RED) {
 		size_t len;
 		int lookup_depth, avg_pkt_size;
 		double w_q;
 
-		if (fs->min_th >= fs->max_th)
+		if (!(fs->flags & DN_IS_ECN) && (fs->min_th >= fs->max_th))
 		    errx(EX_DATAERR, "min_th %d must be < than max_th %d",
 			fs->min_th, fs->max_th);
+		else if ((fs->flags & DN_IS_ECN) && (fs->min_th > fs->max_th))
+		    errx(EX_DATAERR, "min_th %d must be =< than max_th %d",
+			fs->min_th, fs->max_th);
+
 		if (fs->max_th == 0)
 		    errx(EX_DATAERR, "max_th must be > 0");
 

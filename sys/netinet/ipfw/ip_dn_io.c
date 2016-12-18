@@ -258,6 +258,7 @@ red_drops (struct dn_queue *q, int len)
 	 */
 
 	struct dn_fsk *fs = q->fs;
+	//struct dn_fs *f = &(q->fs->fs);
 	int64_t p_b = 0;
 
 	/* Queue in bytes or packets? */
@@ -293,6 +294,8 @@ red_drops (struct dn_queue *q, int len)
 		return (0);	/* accept packet */
 	}
 	if (q->avg >= fs->max_th) {	/* average queue >=  max threshold */
+		if (fs->fs.flags & DN_IS_ECN)
+			return (1);
 		if (fs->fs.flags & DN_IS_GENTLE_RED) {
 			/*
 			 * According to Gentle-RED, if avg is greater than
@@ -308,6 +311,8 @@ red_drops (struct dn_queue *q, int len)
 			return (1);
 		}
 	} else if (q->avg > fs->min_th) {
+		if (fs->fs.flags & DN_IS_ECN)
+			return (1);		
 		/*
 		 * We compute p_b using the linear dropping function
 		 *	 p_b = c_1 * avg - c_2
@@ -340,6 +345,72 @@ red_drops (struct dn_queue *q, int len)
 }
 
 /*
+ * ECN Processing
+ * The part of this function is adopted from altq
+ */
+static int
+ecn_mark(struct mbuf* m)
+{
+	struct ip *ip;
+	ip = mtod(m, struct ip *);
+
+	switch (ip->ip_v) {
+	case IPVERSION:
+	{
+		u_int8_t otos;
+		int sum;
+
+		if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_NOTECT)
+			return (0);	/* not-ECT */
+		if ((ip->ip_tos & IPTOS_ECN_MASK) == IPTOS_ECN_CE)
+			return (1);	/* already marked */
+
+		/*
+		 * ecn-capable but not marked,
+		 * mark CE and update checksum
+		 */
+		otos = ip->ip_tos;
+		ip->ip_tos |= IPTOS_ECN_CE;
+		/*
+		 * update checksum (from RFC1624)
+		 *	   HC' = ~(~HC + ~m + m')
+		 */
+		sum = ~ntohs(ip->ip_sum) & 0xffff;
+		sum += (~otos & 0xffff) + ip->ip_tos;
+		sum = (sum >> 16) + (sum & 0xffff);
+		sum += (sum >> 16);  /* add carry */
+		ip->ip_sum = htons(~sum & 0xffff);
+		return (1);
+	}
+#ifdef INET6
+	case (IPV6_VERSION >> 4):
+	{
+		struct ip6_hdr *ip6 = mtod(m, struct ip6_hdr *);
+		u_int32_t flowlabel;
+
+		flowlabel = ntohl(ip6->ip6_flow);
+		if ((flowlabel >> 28) != 6)
+			return (0);	/* version mismatch! */
+		if ((flowlabel & (IPTOS_ECN_MASK << 20)) ==
+		    (IPTOS_ECN_NOTECT << 20))
+			return (0);	/* not-ECT */
+		if ((flowlabel & (IPTOS_ECN_MASK << 20)) ==
+		    (IPTOS_ECN_CE << 20))
+			return (1);	/* already marked */
+		/*
+		 * ecn-capable but not marked, mark CE
+		 */
+		flowlabel |= (IPTOS_ECN_CE << 20);
+		ip6->ip6_flow = htonl(flowlabel);
+		return (1);
+	}
+#endif
+	}
+	return (0);
+}
+
+
+/*
  * Enqueue a packet in q, subject to space and queue management policy
  * (whose parameters are in q->fs).
  * Update stats for the queue and the scheduler.
@@ -370,8 +441,13 @@ dn_enqueue(struct dn_queue *q, struct mbuf* m, int drop)
 		goto drop;
 	if (f->plr && random() < f->plr)
 		goto drop;
-	if (f->flags & DN_IS_RED && red_drops(q, m->m_pkthdr.len))
-		goto drop;
+	if (f->flags & DN_IS_RED && red_drops(q, m->m_pkthdr.len)) {
+		if (f->flags & DN_IS_ECN) {
+			if (!ecn_mark(m))
+				goto drop;
+		} else
+			goto drop;
+	}
 	if (f->flags & DN_QSIZE_BYTES) {
 		if (q->ni.len_bytes > f->qsize)
 			goto drop;

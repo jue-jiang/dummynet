@@ -102,6 +102,7 @@ enum {	/* user flags */
 	DN_QHT_HASH	= 0x0004,	/* qht is a hash table */
 	DN_QSIZE_BYTES	= 0x0008,	/* queue size is in bytes */
 	DN_HAS_PROFILE	= 0x0010,	/* a link has a profile */
+	DN_IS_ECN	= 0x0080,
 	DN_IS_RED	= 0x0020,
 	DN_IS_GENTLE_RED= 0x0040,
 	DN_PIPE_CMD	= 0x1000,	/* pipe config... */
